@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>coco</title>
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Title bar -->
+    <header id="titlebar">
+      <div class="tb-left">
+        <button class="tb-btn dock-toggle" id="btn-dock" title="Hide sidebar (⌘B)" aria-label="Hide sidebar"></button>
+      </div>
+      <div class="tb-title" id="tb-title">coco</div>
+      <div class="tb-right">
+        <button class="tb-btn" id="btn-palette" title="Command palette (⌘K)"></button>
+        <button class="tb-btn" id="btn-settings" title="Settings"></button>
+      </div>
+    </header>
+
+    <div id="body">
+      <!-- Side dock -->
+      <aside id="dock">
+        <div class="dock-brand">
+          <span class="dock-logo" id="dock-logo"></span>
+          <span class="dock-name">coco</span>
+          <button class="workspace-switcher" id="workspace-switcher" title="Switch workspace" aria-label="Switch workspace" aria-haspopup="menu" aria-expanded="false"></button>
+        </div>
+
+        <div class="dock-search">
+          <span class="dock-search-ic" id="dock-search-ic"></span>
+          <input type="text" id="dock-filter" placeholder="Filter sessions…" spellcheck="false" />
+        </div>
+
+        <div class="tree-tools">
+          <span>Sessions</span>
+          <button id="dock-add-term" title="New local terminal (⌘T)" aria-label="New local terminal"></button>
+          <button id="dock-add-host" title="New remote session" aria-label="New remote session" aria-haspopup="menu"></button>
+          <button id="dock-add-folder" title="New session folder (⌘⇧N)" aria-label="New session folder"></button>
+          <button id="dock-collapse-all" title="Collapse all folders" aria-label="Collapse all folders"></button>
+        </div>
+        <div id="session-tree" class="dock-scroll"></div>
+
+        <div class="dock-utilities">
+          <button id="btn-commands" title="Routine commands"></button>
+          <button id="btn-theme" title="Appearance and themes (⌘P)"></button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main id="main">
+        <div id="topbar"></div>
+        <div id="terminals">
+          <div id="empty-state">
+            <div class="empty-logo" id="empty-logo"></div>
+            <div class="empty-title">No terminal open</div>
+            <div class="empty-sub">Press <kbd>⌘T</kbd> for a new terminal · <kbd>⌘K</kbd> for the command palette</div>
+          </div>
+        </div>
+        <footer id="statusbar">
+          <span class="st-item" id="st-shell"></span>
+          <button class="st-git hidden" id="st-git"></button>
+          <span class="st-spacer"></span>
+          <button class="st-btn" id="st-domain"></button>
+          <span class="st-item" id="st-count"></span>
+          <span class="st-sep">·</span>
+          <span class="st-item" id="st-clock"></span>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <!-- Theme picker -->
+  <div id="theme-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>Themes</span>
+        <button class="modal-close" id="theme-close"></button>
+      </div>
+      <div id="theme-grid" class="theme-grid"></div>
+    </div>
+  </div>
+
+  <!-- Command palette -->
+  <div id="palette-modal" class="modal hidden">
+    <div class="modal-card palette">
+      <div class="palette-search">
+        <span class="palette-ic" id="palette-ic"></span>
+        <input type="text" id="palette-input" placeholder="Type a command or jump to a session…" spellcheck="false" autocomplete="off" />
+      </div>
+      <div id="palette-list" class="palette-list"></div>
+    </div>
+  </div>
+
+  <!-- Generic prompt modal -->
+  <div id="prompt-modal" class="modal hidden">
+    <div class="modal-card small">
+      <div class="modal-head"><span id="prompt-title">Rename</span></div>
+      <input type="text" id="prompt-input" autocomplete="off" spellcheck="false" />
+      <div class="modal-actions">
+        <button id="prompt-cancel" class="btn-ghost">Cancel</button>
+        <button id="prompt-ok" class="btn-accent">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context menu -->
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="../../node_modules/@xterm/addon-search/lib/addon-search.js"></script>
+  <script src="../../node_modules/@xterm/addon-serialize/lib/addon-serialize.js"></script>
+  <script src="icons.js"></script>
+  <script src="themes.js"></script>
+  <script src="logo.js"></script>
+  <script src="platform-paths.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
