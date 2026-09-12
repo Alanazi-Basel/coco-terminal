@@ -19,6 +19,7 @@ const state = {
   dockCollapsed: false,
   selectedFolderId: null,
   tree: [],
+  savedHosts: [],    // durable connection inventory, independent of sidebar tabs
   keys: [],          // saved SSH identity files: { id, name, path }
   commands: [],      // routine-command library: cmd-folder / command nodes
   layouts: [],       // reusable saved split layouts
@@ -37,6 +38,8 @@ const live = new Map();      // sessionId -> { term, fit, search, pane, dead }
 let activeId = null;
 let broadcast = false;       // type-to-all-panes mode
 let restoreResolved = false;
+let persistenceReady = false;
+let persistenceErrorShown = false;
 let idCounter = 1;
 const uid = (p) => `${p}-${Date.now().toString(36)}-${idCounter++}`;
 
@@ -93,7 +96,8 @@ async function loadState() {
   const s = await API.storeGet('state');
   if (!s) {
     state.commands = defaultCommands();
-    state.workspaceProfiles = [{ id: 'global', name: 'Default', tree: [], keys: [], commands: state.commands, domains: [], openIds: [], layout: null, activeId: null }];
+    state.workspaceProfiles = [{ id: 'global', name: 'Default', tree: [], savedHosts: [], keys: [], commands: state.commands, domains: [], openIds: [], layout: null, activeId: null }];
+    persistenceReady = true;
     return { openIds: [], activeId: null, savedLayout: null };
   }
   state.themeId = s.themeId || state.themeId;
@@ -107,42 +111,82 @@ async function loadState() {
   state.workspaceProfiles = Array.isArray(s.workspaceProfiles) && s.workspaceProfiles.length ? s.workspaceProfiles : [{
     id: 'global', name: 'Default',
     tree: Array.isArray(s.tree) ? s.tree : [],
+    savedHosts: Array.isArray(s.savedHosts) ? s.savedHosts : undefined,
     keys: Array.isArray(s.keys) ? s.keys : [],
     commands: Array.isArray(s.commands) ? s.commands : defaultCommands(),
     domains: Array.isArray(s.domains) ? s.domains : [],
     openIds: s.openIds || [], layout: s.layout || null, activeId: s.activeId || null,
   }];
   if (!state.workspaceProfiles.some((workspace) => workspace.id === 'global')) {
-    state.workspaceProfiles.unshift({ id: 'global', name: 'Default', tree: [], keys: [], commands: defaultCommands(), domains: [], openIds: [], layout: null, activeId: null });
+    state.workspaceProfiles.unshift({ id: 'global', name: 'Default', tree: [], savedHosts: [], keys: [], commands: defaultCommands(), domains: [], openIds: [], layout: null, activeId: null });
   }
+  state.workspaceProfiles.forEach(migrateSavedHosts);
   const defaultWorkspace = state.workspaceProfiles.find((workspace) => workspace.id === 'global');
   if (defaultWorkspace && (!defaultWorkspace.name || defaultWorkspace.name === 'Global')) defaultWorkspace.name = 'Default';
   state.activeWorkspaceId = state.workspaceProfiles.some((workspace) => workspace.id === s.activeWorkspaceId) ? s.activeWorkspaceId : 'global';
   const workspace = state.workspaceProfiles.find((item) => item.id === state.activeWorkspaceId);
   state.tree = workspace.tree || [];
+  state.savedHosts = workspace.savedHosts;
   state.keys = workspace.keys || [];
   state.commands = workspace.commands || defaultCommands();
   state.domains = workspace.domains || [];
+  persistenceReady = true;
   return { openIds: workspace.openIds || [], activeId: workspace.activeId || null, savedLayout: workspace.layout || null };
 }
 function activeWorkspace() { return state.workspaceProfiles.find((workspace) => workspace.id === state.activeWorkspaceId); }
+function savedHostSnapshot(node) {
+  return {
+    id: node.id, type: 'host', name: node.name || node.host, host: node.host,
+    user: node.user || '', port: node.port || '22', keyId: node.keyId || '',
+    sftp: !!node.sftp, color: node.color || '', init: node.init || '',
+    pinned: true, manualName: true,
+  };
+}
+function migrateSavedHosts(workspace) {
+  if (Array.isArray(workspace.savedHosts)) return;
+  workspace.savedHosts = [];
+  eachSession((node) => {
+    if (node.type === 'host' && !workspace.savedHosts.some((host) => host.id === node.id)) {
+      workspace.savedHosts.push(savedHostSnapshot(node));
+    }
+  }, workspace.tree || []);
+}
+function syncSavedHostsFromTree() {
+  eachSession((node) => {
+    if (node.type !== 'host' || node.sourceHostId) return;
+    const existing = findSavedHost(node.id);
+    if (existing) Object.assign(existing, savedHostSnapshot(node));
+    else state.savedHosts.push(savedHostSnapshot(node));
+  });
+}
 function syncActiveWorkspace() {
   const workspace = activeWorkspace();
   if (!workspace) return;
+  syncSavedHostsFromTree();
   Object.assign(workspace, {
-    tree: state.tree, keys: state.keys, commands: state.commands, domains: state.domains,
+    tree: state.tree, savedHosts: state.savedHosts, keys: state.keys, commands: state.commands, domains: state.domains,
     layout, openIds: [...live.keys()], activeId,
   });
 }
-function persist() {
+async function persist() {
+  if (!persistenceReady) return false;
   syncActiveWorkspace();
-  return API.storeSet('state', {
-    themeId: state.themeId, fontSize: state.fontSize,
-    dockCollapsed: state.dockCollapsed, selectedFolderId: state.selectedFolderId,
-    settings: state.settings, layouts: state.layouts, workspaceProfiles: state.workspaceProfiles,
-    activeWorkspaceId: state.activeWorkspaceId, tunnels: state.tunnels,
-    layoutMode: state.layoutMode, layout, openIds: [...live.keys()], activeId,
-  });
+  try {
+    await API.storeSet('state', {
+      themeId: state.themeId, fontSize: state.fontSize,
+      dockCollapsed: state.dockCollapsed, selectedFolderId: state.selectedFolderId,
+      settings: state.settings, layouts: state.layouts, workspaceProfiles: state.workspaceProfiles,
+      activeWorkspaceId: state.activeWorkspaceId, tunnels: state.tunnels,
+      layoutMode: state.layoutMode, layout, openIds: [...live.keys()], activeId,
+    });
+    persistenceErrorShown = false;
+    return true;
+  } catch (error) {
+    console.error('Could not save workspace:', error);
+    if (!persistenceErrorShown) flashToast('Could not save your connections. Check available disk space and try Save again.');
+    persistenceErrorShown = true;
+    return false;
+  }
 }
 function workspaceBufferKey() { return `buffers:${state.activeWorkspaceId}`; }
 // A few starter routine commands so the dropdown isn't empty on first run.
@@ -432,7 +476,11 @@ function layoutLeafIds() { const ids = []; eachLeaf((l) => ids.push(l.session));
 
 // Create (but do not place) a terminal for a session node.
 function ensureTerminal(node, restore) {
-  if (live.has(node.id)) return live.get(node.id);
+  const existing = live.get(node.id);
+  if (existing) {
+    if (!existing.dead || node.type !== 'host') return existing;
+    closeEntry(node.id);
+  }
   const theme = themeById(state.themeId);
   const pane = document.createElement('div');
   pane.className = 'term-pane';
@@ -544,6 +592,10 @@ function ensureTerminal(node, restore) {
     return true;
   });
   term.onData((d) => {
+    if (entry.dead) {
+      if (node.type === 'host' && /[\r\n]/.test(d)) openTerminal(node);
+      return;
+    }
     if (d === '\r') playWriteSound('enter');
     else if (d.length === 1 && d.charCodeAt(0) >= 32) playWriteSound('scratch');
     if (entry.claudeActive && /[\r\n]/.test(d)) {
@@ -564,11 +616,11 @@ function ensureTerminal(node, restore) {
   term.onResize(({ cols, rows }) => API.resize(node.id, cols, rows));
   term.attachCustomKeyEventHandler(globalKeyHandler);
   term.registerLinkProvider(makePathLinkProvider(node, term));
-  // run a per-session startup command once the shell/connection is up
-  if (node.init) entry._initTimer = setTimeout(() => {
+  // SSH startup commands travel with the authenticated SSH request below.
+  if (node.init && node.type !== 'host') entry._initTimer = setTimeout(() => {
     entry._initTimer = null;
     if (live.has(node.id)) API.input(node.id, node.init + '\r');
-  }, node.type === 'host' ? 1300 : 350);
+  }, 350);
 
   const isHost = node.type === 'host';
   const skippedInteractiveRestore = !isHost && unsafeRestoreBuffer(restore);
@@ -597,23 +649,36 @@ function ensureTerminal(node, restore) {
   const spawnOpts = { tabId: node.id, cwd: node.cwd, command: node.command, history: seedHistory };
   if (isHost) {
     const key = node.keyId && state.keys.find((k) => k.id === node.keyId);
-    spawnOpts.ssh = { host: node.host, port: node.port, user: node.user, identity: key ? key.path : '', mode: node.sftp ? 'sftp' : 'ssh' };
+    spawnOpts.ssh = { host: node.host, port: node.port, user: node.user, identity: key ? key.path : '', mode: node.sftp ? 'sftp' : 'ssh', init: node.init || '' };
   }
   API.spawn(spawnOpts).then((res) => {
+    if (live.get(node.id) !== entry) return;
+    if (!res || !res.ok) {
+      markTerminalExited(node.id, res && res.error || 'The terminal could not start.');
+      return;
+    }
     if (!isHost && res && res.cwd) {
       node.cwd = res.cwd;
       if (!node.manualName) { node.name = basename(res.cwd); renderTree(); }
       if (node.id === activeId) updateStatus();
     }
     setTimeout(() => { try { fit.fit(); } catch {} }, 30);
+  }).catch((error) => {
+    if (live.get(node.id) === entry) markTerminalExited(node.id, error.message || 'The terminal could not start.');
   });
   return entry;
 }
 
 // Open a session: ensure its terminal, then show it (focus if visible, else load into focused pane).
 function openTerminal(node, restore) {
-  ensureTerminal(node, restore);
-  if (layout && findLeaf(node.id)) { setFocus(node.id); return; }
+  if (node.type === 'host') node = ensureHostInTree(node);
+  const previous = live.get(node.id);
+  const entry = ensureTerminal(node, restore);
+  if (layout && findLeaf(node.id)) {
+    if (previous !== entry) { renderLayout(); renderTree(); autosave(); }
+    setFocus(node.id);
+    return;
+  }
   if (!layout) layout = leafNode(node.id);
   else { const f = findLeaf(activeId); if (f) f.leaf.session = node.id; else layout = leafNode(node.id); }
   setFocus(node.id);
@@ -903,14 +968,16 @@ function deleteNode(id) {
   if (!r) return;
   const isFolder = r.node.type === 'folder';
   const isHost = r.node.type === 'host';
-  const label = isFolder ? `folder “${r.node.name}” and everything inside it` : `${isHost ? 'saved host' : 'session'} “${r.node.name}”`;
+  const label = isFolder ? `folder “${r.node.name}” and its sidebar entries` : `${isHost ? 'sidebar entry' : 'session'} “${r.node.name}”`;
   const doDelete = () => {
+    // Capture any legacy/new tree host before its sidebar entry disappears.
+    syncSavedHostsFromTree();
     const fresh = findNode(id);
     if (!fresh) return;
     const ids = [];
     if (fresh.node.type === 'folder') eachSession((s) => ids.push(s.id), fresh.node.children);
     else ids.push(fresh.node.id);
-    ids.forEach((sid) => { if (live.has(sid)) closeTermSilent(sid); });
+    ids.forEach((sid) => { if (live.has(sid)) closePane(sid); });
     const again = findNode(id);
     if (again) again.list.splice(again.index, 1);
     if (state.selectedFolderId === id) state.selectedFolderId = null;
@@ -919,9 +986,9 @@ function deleteNode(id) {
   };
   if (!state.settings.confirmDelete) { doDelete(); return; }
   confirmModal({
-    title: isFolder ? 'Remove folder permanently?' : isHost ? 'Remove saved host permanently?' : 'Remove session permanently?',
-    message: `Remove ${label}? This cannot be undone.`,
-    okLabel: 'Remove permanently', danger: true, rememberLabel: 'Don’t show removal confirmations',
+    title: isFolder ? 'Remove folder from sidebar?' : isHost ? 'Remove connection from sidebar?' : 'Remove session permanently?',
+    message: `Remove ${label}?${isHost || isFolder ? ' Saved SSH connections remain available in SSH Connections.' : ' This cannot be undone.'}`,
+    okLabel: isHost || isFolder ? 'Remove from sidebar' : 'Remove permanently', danger: true, rememberLabel: 'Don’t show removal confirmations',
     onOk: (remembered) => { if (remembered) { state.settings.confirmDelete = false; persist(); } doDelete(); },
   });
 }
@@ -1111,7 +1178,7 @@ function openSettings() {
 }
 
 // ---------------- generic form modal ----------------
-function formModal({ title, fields, submitLabel = 'Save', onSubmit, onCancel, extra }) {
+function formModal({ title, fields, submitLabel = 'Save', secondarySubmitLabel, validate, onSubmit, onCancel, extra }) {
   const overlay = document.createElement('div');
   overlay.className = 'modal';
   const fieldHtml = fields.map((f) => {
@@ -1132,21 +1199,25 @@ function formModal({ title, fields, submitLabel = 'Save', onSubmit, onCancel, ex
       <div class="fm-body">${fieldHtml}${extra ? `<div class="fm-extra">${extra}</div>` : ''}</div>
       <div class="modal-actions">
         <button class="btn-ghost" id="fm-cancel">Cancel</button>
+        ${secondarySubmitLabel ? `<button class="btn-ghost" id="fm-secondary">${escapeHtml(secondarySubmitLabel)}</button>` : ''}
         <button class="btn-accent" id="fm-ok">${escapeHtml(submitLabel)}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
   let submitted = false;
   const close = () => { overlay.remove(); if (!submitted && onCancel) onCancel(); focusActive(); };
-  const submit = () => {
-    submitted = true;
+  const submit = (action = 'primary') => {
     const vals = {};
-    fields.forEach((f) => { vals[f.key] = document.getElementById('fm-' + f.key).value.trim(); });
-    overlay.remove(); focusActive(); onSubmit(vals);
+    fields.forEach((f) => { vals[f.key] = overlay.querySelector('#fm-' + f.key).value.trim(); });
+    const error = validate && validate(vals);
+    if (error) { flashToast(error); return; }
+    submitted = true;
+    overlay.remove(); focusActive(); onSubmit(vals, action);
   };
   overlay.querySelector('#fm-x').onclick = close;
   overlay.querySelector('#fm-cancel').onclick = close;
-  overlay.querySelector('#fm-ok').onclick = submit;
+  overlay.querySelector('#fm-ok').onclick = () => submit();
+  if (secondarySubmitLabel) overlay.querySelector('#fm-secondary').onclick = () => submit('secondary');
   overlay.onkeydown = (e) => { if (e.key === 'Escape') close(); if (e.key === 'Enter' && e.target.tagName !== 'SELECT' && e.target.tagName !== 'TEXTAREA') submit(); };
   overlay.onclick = (e) => { if (e.target === overlay) close(); };
   setTimeout(() => { const first = overlay.querySelector('input,select'); if (first) first.focus(); }, 20);
@@ -1170,28 +1241,39 @@ function hostFields(node, mode = 'ssh') {
   ];
 }
 function openHostAs(node, sftp) {
-  const tmp = { id: uid('host'), type: 'host', name: node.name + (sftp ? ' · SFTP' : ''), host: node.host, user: node.user, port: node.port, keyId: node.keyId, sftp: !!sftp, pinned: false, manualName: true };
+  const tmp = { ...savedHostSnapshot(node), id: uid('host'), sourceHostId: node.sourceHostId || node.id, name: node.name + (sftp ? ' · SFTP' : ''), sftp: !!sftp, pinned: false };
   const r = findNode(node.id);
   const folder = r && r.parent ? r.parent : null;
   if (folder) folder.children.push(tmp); else state.tree.push(tmp);
   openTerminal(tmp);
+}
+function validateHost(values) {
+  if (!values.host || /\s|[\x00-\x1f\x7f]/.test(values.host) || values.host.startsWith('-')) return 'Enter a server address, such as server.example.com.';
+  if (/\s|[\x00-\x1f\x7f]/.test(values.user || '') || (values.user || '').startsWith('-')) return 'Enter a valid SSH username.';
+  if (values.port && (!/^\d+$/.test(values.port) || Number(values.port) < 1 || Number(values.port) > 65535)) return 'Port must be a number from 1 to 65535.';
+  return null;
 }
 function newHost(folderId, mode = 'ssh') {
   const isSftp = mode === 'sftp';
   const form = formModal({
     title: isSftp ? 'Add SFTP Session' : 'Add SSH Session',
     submitLabel: isSftp ? 'Save and open files' : 'Save and connect',
+    secondarySubmitLabel: 'Save only',
+    validate: validateHost,
     fields: hostFields(null, mode),
     extra: `<div class="remote-form-kind"><span>${ic(isSftp ? 'folder-key' : 'server', { size: 18 })}</span><div><strong>${isSftp ? 'SFTP files' : 'SSH terminal'}</strong><small>${isSftp ? 'Browse and transfer files securely over SSH.' : 'Open an interactive remote shell.'}</small></div></div><button class="fm-link" id="fm-managekeys">${ic('key', { size: 14 })}<span>Manage SSH keys</span></button>`,
-    onSubmit: (v) => {
-      if (!v.host) return;
+    onSubmit: async (v, action) => {
       const node = { id: uid('host'), type: 'host', name: v.name || v.host, host: v.host, user: v.user, port: v.port || '22', keyId: v.keyId || '', sftp: isSftp, color: v.color || '', init: v.init || '', pinned: true, manualName: true };
       const fid = folderId !== undefined ? folderId : state.selectedFolderId;
       const t = fid ? findNode(fid) : null;
       if (t && t.node.type === 'folder') { t.node.children.push(node); t.node.expanded = true; }
       else state.tree.push(node);
-      persist(); renderTree();
-      if (node.sftp) openSftpBrowser(node); else openTerminal(node);
+      renderTree();
+      if (!await persist()) return;
+      flashToast(`${isSftp ? 'SFTP' : 'SSH'} connection saved`);
+      if (action !== 'secondary') {
+        if (node.sftp) openSftpBrowser(node); else openTerminal(node);
+      }
     },
   });
   form.querySelector('.modal-card').classList.add('host-form-card');
@@ -1201,18 +1283,53 @@ function newHost(folderId, mode = 'ssh') {
 }
 
 function savedHosts() {
-  const hosts = [];
-  eachSession((node) => { if (node.type === 'host') hosts.push(node); });
-  return hosts;
+  return state.savedHosts;
+}
+function findSavedHost(id) { return state.savedHosts.find((host) => host.id === id); }
+function ensureHostInTree(host) {
+  const existing = findNode(host.id);
+  if (existing) return existing.node;
+  const node = { ...host };
+  state.tree.push(node);
+  return node;
+}
+function openSavedHost(host) {
+  if (!host) return;
+  if (host.sftp) openSftpBrowser(host);
+  else openTerminal(ensureHostInTree(host));
+}
+function deleteSavedHost(id) {
+  const host = findSavedHost(id);
+  if (!host) return;
+  const remove = () => {
+    const related = [];
+    eachSession((node) => {
+      if (node.type === 'host' && (node.id === id || node.sourceHostId === id)) related.push(node.id);
+    });
+    related.forEach((sessionId) => { if (live.has(sessionId)) closePane(sessionId); });
+    related.forEach((sessionId) => {
+      const item = findNode(sessionId);
+      if (item) item.list.splice(item.index, 1);
+    });
+    const index = state.savedHosts.findIndex((item) => item.id === id);
+    if (index >= 0) state.savedHosts.splice(index, 1);
+    persist(); renderLayout(); renderTree(); updateStatus(); updateTitle();
+  };
+  if (state.settings.confirmDelete === false) { remove(); return; }
+  confirmModal({
+    title: 'Delete saved SSH connection permanently?',
+    message: `Delete “${host.name}” from SSH Connections and close its open terminals?`,
+    okLabel: 'Delete saved connection', danger: true, onOk: remove,
+  });
 }
 function openHosts() {
   const overlay = document.createElement('div');
   overlay.className = 'modal';
   overlay.innerHTML = `
     <div class="modal-card hosts-card">
-      <div class="modal-head"><span>Remote Sessions</span><button class="modal-close" id="hosts-x">${ic('x', { size: 16 })}</button></div>
+      <div class="modal-head"><span>SSH Connections</span><button class="modal-close" id="hosts-x">${ic('x', { size: 16 })}</button></div>
       <div class="hosts-toolbar">
-        <span>Saved SSH terminals and SFTP file connections</span>
+        <span>Saved connections stay here when sidebar terminals are removed.</span>
         <button class="btn-ghost" id="hosts-keys">${ic('key', { size: 14 })} Keys</button>
         <button class="btn-ghost" id="hosts-add-sftp">${ic('folder-key', { size: 14 })} Add SFTP</button>
         <button class="btn-accent" id="hosts-add">${ic('server', { size: 14 })} Add SSH</button>
@@ -1225,7 +1342,7 @@ function openHosts() {
     const list = overlay.querySelector('.hosts-list');
     const hosts = savedHosts();
     if (!hosts.length) {
-      list.innerHTML = `<div class="hosts-empty">${ic('server', { size: 25 })}<strong>No remote sessions</strong><span>Add an SSH terminal or an SFTP file connection.</span><div class="hosts-empty-actions"><button class="btn-ghost" id="hosts-empty-sftp">${ic('folder-key', { size: 14 })} Add SFTP</button><button class="btn-accent" id="hosts-empty-add">${ic('server', { size: 14 })} Add SSH</button></div></div>`;
+      list.innerHTML = `<div class="hosts-empty">${ic('server', { size: 25 })}<strong>No saved connections</strong><span>Add an SSH terminal or an SFTP file connection.</span><div class="hosts-empty-actions"><button class="btn-ghost" id="hosts-empty-sftp">${ic('folder-key', { size: 14 })} Add SFTP</button><button class="btn-accent" id="hosts-empty-add">${ic('server', { size: 14 })} Add SSH</button></div></div>`;
       list.querySelector('#hosts-empty-add').onclick = () => { close(); newHost(undefined, 'ssh'); };
       list.querySelector('#hosts-empty-sftp').onclick = () => { close(); newHost(undefined, 'sftp'); };
       return;
@@ -1236,23 +1353,23 @@ function openHosts() {
       return `<div class="host-row" data-host="${host.id}">
         <span class="host-mark" ${host.color ? `style="color:${host.color}"` : ''}>${ic(host.sftp ? 'folder-key' : 'server', { size: 17 })}</span>
         <span class="host-info"><strong>${escapeHtml(host.name)}</strong><small>${host.sftp ? 'SFTP' : 'SSH'} · ${escapeHtml(target)} · ${escapeHtml(key ? key.name : 'Default authentication')}</small></span>
-        <button class="host-connect" data-connect="${host.id}">${ic(host.sftp ? 'folder-key' : 'plug', { size: 14 })} Open ${host.sftp ? 'files' : 'terminal'}</button>
+        <button class="host-connect" data-connect="${host.id}">${ic(host.sftp ? 'folder-key' : 'plug', { size: 14 })} ${host.sftp ? 'Open files' : live.get(host.id)?.dead ? 'Reconnect' : live.has(host.id) ? 'Open terminal' : 'Connect'}</button>
         <button class="row-btn" data-alternate="${host.id}" title="${host.sftp ? 'Open SSH terminal' : 'Open SFTP files'}">${ic(host.sftp ? 'square-terminal' : 'folder-key', { size: 14 })}</button>
         <button class="row-btn" data-edit="${host.id}" title="Edit host">${ic('pencil', { size: 14 })}</button>
-        <button class="row-btn danger" data-delete="${host.id}" title="Delete saved host">${ic('trash-2', { size: 14 })}</button>
+        <button class="row-btn danger" data-delete="${host.id}" title="Delete saved connection permanently">${ic('trash-2', { size: 14 })}</button>
       </div>`;
     }).join('');
     list.querySelectorAll('[data-connect]').forEach((button) => {
-      button.onclick = () => { const r = findNode(button.dataset.connect); if (r) { close(); if (r.node.sftp) openSftpBrowser(r.node); else openTerminal(r.node); } };
+      button.onclick = () => { const host = findSavedHost(button.dataset.connect); if (host) { close(); openSavedHost(host); } };
     });
     list.querySelectorAll('[data-alternate]').forEach((button) => {
-      button.onclick = () => { const r = findNode(button.dataset.alternate); if (r) { close(); if (r.node.sftp) openHostAs(r.node, false); else openSftpBrowser(r.node); } };
+      button.onclick = () => { const host = findSavedHost(button.dataset.alternate); if (host) { close(); if (host.sftp) openHostAs(host, false); else openSftpBrowser(host); } };
     });
     list.querySelectorAll('[data-edit]').forEach((button) => {
       button.onclick = () => { close(); editHost(button.dataset.edit); };
     });
     list.querySelectorAll('[data-delete]').forEach((button) => {
-      button.onclick = () => { close(); deleteNode(button.dataset.delete); };
+      button.onclick = () => { close(); deleteSavedHost(button.dataset.delete); };
     });
   };
   render();
@@ -1263,19 +1380,35 @@ function openHosts() {
   overlay.onclick = (event) => { if (event.target === overlay) close(); };
 }
 function editHost(id) {
-  const r = findNode(id);
-  if (!r || r.node.type !== 'host') return;
+  const sidebarNode = findNode(id)?.node;
+  const host = findSavedHost(sidebarNode?.sourceHostId || id) || sidebarNode;
+  if (!host || host.type !== 'host') return;
   const form = formModal({
-    title: r.node.sftp ? 'Edit SFTP Session' : 'Edit SSH Session', submitLabel: 'Save',
-    fields: hostFields(r.node, r.node.sftp ? 'sftp' : 'ssh'),
-    extra: `<div class="remote-form-kind"><span>${ic(r.node.sftp ? 'folder-key' : 'server', { size: 18 })}</span><div><strong>${r.node.sftp ? 'SFTP files' : 'SSH terminal'}</strong><small>${r.node.sftp ? 'Secure file browsing and transfers.' : 'Interactive remote shell connection.'}</small></div></div>`,
-    onSubmit: (v) => {
-      if (!v.host) return;
-      Object.assign(r.node, { name: v.name || v.host, host: v.host, user: v.user, port: v.port || '22', keyId: v.keyId || '', color: v.color || '', init: v.init || '' });
-      persist(); renderTree(); updateStatus(); updateTitle();
+    title: host.sftp ? 'Edit SFTP Session' : 'Edit SSH Session', submitLabel: 'Save',
+    validate: validateHost,
+    fields: hostFields(host, host.sftp ? 'sftp' : 'ssh'),
+    extra: `<div class="remote-form-kind"><span>${ic(host.sftp ? 'folder-key' : 'server', { size: 18 })}</span><div><strong>${host.sftp ? 'SFTP files' : 'SSH terminal'}</strong><small>${host.sftp ? 'Secure file browsing and transfers.' : 'Interactive remote shell connection.'}</small></div></div>`,
+    onSubmit: async (v) => {
+      const updates = { name: v.name || v.host, host: v.host, user: v.user, port: v.port || '22', keyId: v.keyId || '', color: v.color || '', init: v.init || '' };
+      const related = [];
+      eachSession((node) => {
+        if (node.type === 'host' && (node.id === host.id || node.sourceHostId === host.id)) related.push(node);
+      });
+      const connectionFields = ['host', 'user', 'port', 'keyId', 'init'];
+      const restarting = related.filter((node) => live.has(node.id) && connectionFields.some((field) =>
+        String(node[field] || (field === 'port' ? '22' : '')) !== String(updates[field])));
+      // Never label a shell on the old server as the newly saved connection.
+      // Close every affected copy before changing its identity; reopening then
+      // starts a fresh SSH process with the edited settings. Cosmetic edits
+      // preserve the current shell.
+      restarting.forEach((node) => closePane(node.id));
+      Object.assign(host, updates);
+      related.forEach((node) => Object.assign(node, updates));
+      renderTree(); updateStatus(); updateTitle();
+      if (await persist()) flashToast(restarting.length ? 'Connection saved. Open it again to reconnect.' : 'Connection saved');
     },
   });
-  form.querySelector('.modal-card').classList.add('host-form-card', r.node.sftp ? 'remote-sftp-form' : 'remote-ssh-form');
+  form.querySelector('.modal-card').classList.add('host-form-card', host.sftp ? 'remote-sftp-form' : 'remote-ssh-form');
 }
 function openKeys() {
   const overlay = document.createElement('div');
@@ -1429,7 +1562,7 @@ function renderInlineImage(term, entry, args, b64) {
 function serializeLeaf(sid) {
   const r = findNode(sid); if (!r) return null;
   const n = r.node;
-  if (n.type === 'host') return { type: 'host', name: n.name, host: n.host, user: n.user, port: n.port, keyId: n.keyId, sftp: n.sftp, color: n.color, init: n.init };
+  if (n.type === 'host') return { type: 'host', sourceHostId: n.sourceHostId || n.id, name: n.name, host: n.host, user: n.user, port: n.port, keyId: n.keyId, sftp: n.sftp, color: n.color, init: n.init };
   return { type: 'session', name: n.manualName ? n.name : '', cwd: n.cwd, init: n.init || '' };
 }
 function serializeLayout(node) {
@@ -1442,7 +1575,7 @@ function materializeLayout(snode) {
   if (snode.type === 'leaf') {
     const d = snode.session; if (!d) return null;
     let node;
-    if (d.type === 'host') node = { id: uid('host'), type: 'host', name: d.name, host: d.host, user: d.user, port: d.port, keyId: d.keyId, sftp: d.sftp, color: d.color, init: d.init, pinned: false, manualName: true };
+    if (d.type === 'host') node = { id: uid('host'), type: 'host', sourceHostId: d.sourceHostId, name: d.name, host: d.host, user: d.user, port: d.port, keyId: d.keyId, sftp: d.sftp, color: d.color, init: d.init, pinned: false, manualName: true };
     else node = { id: uid('ses'), type: 'session', name: d.name || 'shell', cwd: d.cwd, command: '', init: d.init, pinned: false, manualName: !!d.name };
     state.tree.push(node);
     ensureTerminal(node);
@@ -1498,6 +1631,7 @@ async function switchWorkspace(id) {
   activeId = null;
   state.activeWorkspaceId = id;
   state.tree = target.tree || [];
+  state.savedHosts = target.savedHosts || [];
   state.keys = target.keys || [];
   state.commands = target.commands || defaultCommands();
   state.domains = target.domains || [];
@@ -1525,6 +1659,30 @@ function renderWorkspaceSwitcher() {
   const workspace = activeWorkspace();
   if (!button || !workspace) return;
   button.innerHTML = `<span class="workspace-symbol">${ic('layers', { size: 12 })}</span><span class="workspace-caption">Workspace</span><span class="workspace-name">${escapeHtml(workspace.name)}</span>${ic('chevron-down', { size: 11 })}`;
+}
+async function removeWorkspaceKeepingConnections(workspace) {
+  if (!workspace || workspace.id === 'global') return;
+  syncActiveWorkspace();
+  const destination = state.workspaceProfiles.find((item) => item.id === 'global');
+  if (!destination) return;
+  migrateSavedHosts(workspace);
+  migrateSavedHosts(destination);
+  for (const host of workspace.savedHosts) {
+    if (!destination.savedHosts.some((item) => item.id === host.id)) destination.savedHosts.push(savedHostSnapshot(host));
+  }
+  if (!Array.isArray(destination.keys)) destination.keys = [];
+  for (const key of workspace.keys || []) {
+    if (!destination.keys.some((item) => item.id === key.id)) destination.keys.push({ ...key });
+  }
+  if (state.activeWorkspaceId === workspace.id) await switchWorkspace('global');
+  else if (state.activeWorkspaceId === 'global') {
+    state.savedHosts = destination.savedHosts;
+    state.keys = destination.keys;
+  }
+  state.workspaceProfiles = state.workspaceProfiles.filter((item) => item.id !== workspace.id);
+  await API.storeDelete(`buffers:${workspace.id}`);
+  await API.storeDelete(`pinbuffers:${workspace.id}`);
+  await persist();
 }
 
 function openWorkspaceMenu() {
@@ -1588,8 +1746,7 @@ function openWorkspaceManager() {
   const render = () => {
     overlay.querySelector('.workspace-list').innerHTML = state.workspaceProfiles.map((workspace) => {
       const sessionCount = (function count(nodes) { return nodes.reduce((total, node) => total + (node.type === 'folder' ? count(node.children || []) : 1), 0); })(workspace.tree || []);
-      const hostCount = [];
-      eachSession((node) => { if (node.type === 'host') hostCount.push(node); }, workspace.tree || []);
+      const hostCount = workspace.savedHosts || [];
       return `<div class="workspace-row" data-workspace-id="${workspace.id}">
         <span class="workspace-row-icon">${ic(workspace.id === 'global' ? 'globe' : 'layers', { size: 17 })}</span>
         <span class="workspace-row-info"><strong>${escapeHtml(workspace.name)}</strong><small>${sessionCount} sessions · ${hostCount.length} hosts · ${(workspace.keys || []).length} keys</small></span>
@@ -1604,11 +1761,9 @@ function openWorkspaceManager() {
     overlay.querySelectorAll('[data-delete-workspace]').forEach((button) => {
       button.onclick = () => {
         const workspace = state.workspaceProfiles.find((item) => item.id === button.dataset.deleteWorkspace);
-        confirmModal({ title: 'Delete Workspace', message: `Delete “${workspace.name}” and its saved sessions, hosts, and settings? SSH key files on disk are not deleted.`, okLabel: 'Delete', danger: true, onOk: () => {
-          state.workspaceProfiles = state.workspaceProfiles.filter((item) => item.id !== workspace.id);
-          API.storeDelete(`buffers:${workspace.id}`);
-          API.storeDelete(`pinbuffers:${workspace.id}`);
-          persist(); render();
+        confirmModal({ title: 'Delete Workspace', message: `Delete “${workspace.name}” and its sessions and settings? Saved SSH connections and keys will move to the Default workspace.`, okLabel: 'Delete workspace', danger: true, onOk: async () => {
+          await removeWorkspaceKeepingConnections(workspace);
+          render();
         } });
       };
     });
@@ -1620,7 +1775,7 @@ function openWorkspaceManager() {
     let number = state.workspaceProfiles.length;
     let name = `Workspace ${number}`;
     while (used.has(name.toLowerCase())) name = `Workspace ${++number}`;
-    const workspace = { id: uid('workspace'), name, tree: [], keys: [], commands: defaultCommands(), domains: [], openIds: [], layout: null, activeId: null };
+    const workspace = { id: uid('workspace'), name, tree: [], savedHosts: [], keys: [], commands: defaultCommands(), domains: [], openIds: [], layout: null, activeId: null };
     state.workspaceProfiles.push(workspace);
     persist();
     render();
@@ -2365,7 +2520,7 @@ function renameNode(id) {
 function matchesFilter(node) {
   if (!state.filter) return true;
   const f = state.filter.toLowerCase();
-  if (node.type === 'session') return node.name.toLowerCase().includes(f) || (node.cwd || '').toLowerCase().includes(f);
+  if (isLeaf(node)) return node.name.toLowerCase().includes(f) || (node.cwd || '').toLowerCase().includes(f) || (node.host || '').toLowerCase().includes(f) || (node.user || '').toLowerCase().includes(f);
   return node.children.some(matchesFilter) || node.name.toLowerCase().includes(f);
 }
 
@@ -2437,7 +2592,7 @@ function openNewTerminalMenu(button) {
   if (items.length) items.push({ sep: true });
   items.push({ icon: 'server', label: 'Add SSH Session…', run: () => newHost(undefined, 'ssh') });
   items.push({ icon: 'folder-key', label: 'Add SFTP Session…', run: () => newHost(undefined, 'sftp') });
-  items.push({ icon: 'settings-2', label: 'Manage Remote Sessions…', run: () => openHosts() });
+  items.push({ icon: 'server', label: 'SSH Connections…', run: () => openHosts() });
   const rect = button.getBoundingClientRect();
   const menu = showMenu(rect.left, rect.bottom + 5, items);
   menu.classList.add('remote-session-menu');
@@ -2552,6 +2707,7 @@ function rowActions(node) {
     box.appendChild(actionBtn('plus', 'New terminal here', (e) => { e.stopPropagation(); newTerminal({ folderId: node.id }); }));
     box.appendChild(actionBtn('pencil', 'Rename', (e) => { e.stopPropagation(); renameNode(node.id); }));
   } else if (node.type === 'host') {
+    if (live.get(node.id)?.dead) box.appendChild(actionBtn('rotate-cw', 'Reconnect', (e) => { e.stopPropagation(); openTerminal(node); }));
     box.appendChild(actionBtn('pencil-line', 'Edit connection', (e) => { e.stopPropagation(); editHost(node.id); }));
   } else {
     box.appendChild(actionBtn('pencil', 'Rename', (e) => { e.stopPropagation(); renameNode(node.id); }));
@@ -2561,7 +2717,7 @@ function rowActions(node) {
       box.appendChild(close);
     }
   }
-  if (node.type !== 'session') box.appendChild(actionBtn('trash-2', node.type === 'folder' ? 'Remove folder' : 'Remove saved host', (e) => { e.stopPropagation(); deleteNode(node.id); }));
+  if (node.type !== 'session') box.appendChild(actionBtn('trash-2', node.type === 'folder' ? 'Remove folder' : 'Remove from sidebar', (e) => { e.stopPropagation(); deleteNode(node.id); }));
   return box;
 }
 function actionBtn(iconName, title, onClick) {
@@ -2889,7 +3045,7 @@ function buildPaletteItems() {
   add('Workspace', { icon: 'layers', label: 'Switch Workspace…', hint: '', run: () => openWorkspaceManager() });
   add('Workspace', { icon: 'square-terminal', label: 'Save Current Layout', hint: accelLabel('CmdOrCtrl+Shift+S'), run: () => saveLayoutPreset() });
   add('Workspace', { icon: 'layers', label: 'Saved Layouts…', hint: '', run: () => openLayoutsManager() });
-  add('Tools', { icon: 'server', label: 'Manage Remote Sessions', hint: '', run: () => openHosts() });
+  add('Tools', { icon: 'server', label: 'SSH Connections', hint: '', run: () => openHosts() });
   add('Tools', { icon: 'key', label: 'Manage SSH Keys', hint: '', run: () => openKeys() });
   add('Tools', { icon: 'globe', label: 'Local Domains…', hint: '', run: () => openDomains() });
   add('Tools', { icon: 'plug', label: 'Port Forwarding…', hint: '', run: () => openTunnels() });
@@ -2977,16 +3133,16 @@ function openContextMenu(e, node) {
     items.push({ icon: 'palette', label: 'Color', submenu: colorSubmenu(node.id) });
     items.push({ icon: 'trash-2', label: 'Delete', danger: true, run: () => deleteNode(node.id) });
   } else if (node.type === 'host') {
-    items.push({ icon: 'plug', label: live.has(node.id) ? 'Focus' : 'Connect', run: () => openTerminal(node) });
+    items.push({ icon: 'plug', label: live.get(node.id)?.dead ? 'Reconnect' : live.has(node.id) ? 'Focus' : 'Connect', run: () => openTerminal(node) });
     items.push({ icon: 'square-terminal', label: 'Open SSH Shell', run: () => openHostAs(node, false) });
     items.push({ icon: 'folder-key', label: 'Open SFTP Browser', run: () => openSftpBrowser(node) });
     items.push({ icon: 'plug', label: 'Open SFTP Terminal', run: () => openHostAs(node, true) });
-    items.push({ icon: 'copy', label: 'Duplicate', run: () => { const c = { ...node, id: uid('host'), pinned: true }; const r = findNode(node.id); (r.parent ? r.parent.children : state.tree).push(c); persist(); renderTree(); } });
+    items.push({ icon: 'copy', label: 'Duplicate', run: () => { const c = { ...savedHostSnapshot(node), id: uid('host') }; const r = findNode(node.id); (r.parent ? r.parent.children : state.tree).push(c); persist(); renderTree(); } });
     items.push({ icon: 'pencil-line', label: 'Edit Connection', run: () => editHost(node.id) });
     items.push({ icon: 'palette', label: 'Color', submenu: colorSubmenu(node.id) });
     items.push({ sep: true });
     if (live.has(node.id)) items.push({ icon: 'x', label: 'Disconnect Host', run: () => closeTerminal(node.id) });
-    items.push({ icon: 'trash-2', label: 'Remove Saved Host Permanently', danger: true, run: () => deleteNode(node.id) });
+    items.push({ icon: 'trash-2', label: 'Remove from Sidebar', run: () => deleteNode(node.id) });
   } else {
     items.push({ icon: 'square-terminal', label: live.has(node.id) ? 'Focus' : 'Open', run: () => openTerminal(node) });
     items.push({ icon: 'copy', label: 'Duplicate', run: () => duplicateSession(node.id) });
@@ -3381,18 +3537,24 @@ API.onData(({ tabId, data }) => {
   writeRaf = requestAnimationFrame(flushWrites);
   writeTimer = setTimeout(flushWrites, 50); // backstop: rAF stalls when the window is hidden
 });
-API.onExit(({ tabId }) => {
+function markTerminalExited(tabId, error) {
   const e = live.get(tabId);
-  if (e) {
+  if (e && !e.dead) {
     const r = findNode(tabId);
     if (e.claudeState && r) claudeComplete(r.node, e);
     e.dead = true;
     e.claudeActive = false;
     if (e._claudeCompleteTimer) clearTimeout(e._claudeCompleteTimer);
-    e.term.write(`\r\n\x1b[38;5;244m[process exited - ${accelLabel('CmdOrCtrl+W')} to close]\x1b[0m\r\n`);
+    if (e._initTimer) clearTimeout(e._initTimer);
+    const detail = error ? `${String(error).replace(/[\x00-\x1f\x7f]/g, ' ')}\r\n` : '';
+    const hint = r && r.node.type === 'host'
+      ? 'SSH disconnected. Press Enter or click this saved connection to reconnect.'
+      : `process exited - ${accelLabel('CmdOrCtrl+W')} to close`;
+    e.term.write(`\r\n\x1b[38;5;244m${detail}[${hint}]\x1b[0m\r\n`);
     renderTree();
   }
-});
+}
+API.onExit(({ tabId }) => markTerminalExited(tabId));
 API.onNotificationOpen(({ tabId }) => {
   if (tabId && live.has(tabId)) activate(tabId);
 });
@@ -3461,7 +3623,7 @@ function wireUI() {
   document.getElementById('btn-theme').onclick = openThemeModal;
   document.getElementById('btn-settings').onclick = openSettings;
   document.getElementById('workspace-switcher').onclick = (event) => { event.stopPropagation(); openWorkspaceMenu(); };
-  document.getElementById('dock-add-host').onclick = (event) => { event.stopPropagation(); openNewTerminalMenu(event.currentTarget); };
+  document.getElementById('dock-add-host').onclick = (event) => { event.stopPropagation(); openHosts(); };
   document.getElementById('dock-add-folder').onclick = () => promptModal('New Folder', 'Folder name', 'New Folder', (v) => v && newFolder(v));
   document.getElementById('dock-add-term').onclick = () => newTerminal({});
   document.getElementById('dock-collapse-all').onclick = toggleAllFolders;
@@ -3581,4 +3743,11 @@ async function init() {
 }
 
 window.addEventListener('error', (e) => console.error('coco error:', e.message, e.filename + ':' + e.lineno));
-init().catch((e) => console.error('coco init failed:', e && e.stack || e));
+init().catch((e) => {
+  console.error('coco init failed:', e && e.stack || e);
+  confirmModal({
+    title: persistenceReady ? 'Coco could not finish starting' : 'Could not load your saved workspace',
+    message: `${e.message || e}${persistenceReady ? '' : ' Coco has kept your saved files unchanged.'}`,
+    okLabel: 'OK', onOk: () => {},
+  });
+});

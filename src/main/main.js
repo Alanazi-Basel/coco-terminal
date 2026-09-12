@@ -9,6 +9,8 @@ const { execFile, spawn: cpSpawn } = require('child_process');
 const { Client: SSH2Client } = require('ssh2');
 const pty = require('node-pty');
 const { Store } = require('./store');
+const { attachPty, stopPty } = require('./pty-lifecycle');
+const { buildSshCommand } = require('./ssh-command');
 const { buildSpawn, defaultShell } = require('./shell-integration');
 
 // Keep upgrades on the same local-only data directory even if product metadata changes.
@@ -142,21 +144,10 @@ process.on('SIGHUP', forceQuit);
 ipcMain.handle('pty:spawn', (event, { tabId, cwd, command, history, ssh }) => {
   let shell, args, env, startCwd;
 
-  if (ssh && ssh.host) {
+  if (ssh) {
     // SSH shell or SFTP file-transfer session. Prompts happen inside the pty.
-    const target = ssh.user ? `${ssh.user}@${ssh.host}` : ssh.host;
-    args = [];
-    if (ssh.mode === 'sftp') {
-      shell = 'sftp';
-      if (ssh.port && String(ssh.port) !== '22') args.push('-P', String(ssh.port)); // sftp uses -P
-      if (ssh.identity) args.push('-i', ssh.identity);
-      args.push('-o', 'StrictHostKeyChecking=accept-new', target);
-    } else {
-      shell = 'ssh';
-      if (ssh.port && String(ssh.port) !== '22') args.push('-p', String(ssh.port));
-      if (ssh.identity) args.push('-i', ssh.identity);
-      args.push('-o', 'ServerAliveInterval=30', '-o', 'StrictHostKeyChecking=accept-new', target);
-    }
+    try { ({ shell, args } = buildSshCommand(ssh)); }
+    catch (error) { return { ok: false, error: error.message }; }
     env = { ...process.env, TERM_PROGRAM: 'coco' };
     startCwd = os.homedir();
   } else {
@@ -176,8 +167,7 @@ ipcMain.handle('pty:spawn', (event, { tabId, cwd, command, history, ssh }) => {
     startCwd = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
   }
 
-  const previous = ptys.get(tabId);
-  if (previous) { try { previous.kill(); } catch {} ptys.delete(tabId); }
+  stopPty(ptys, tabId);
   let p;
   try {
     p = pty.spawn(shell, args, {
@@ -191,17 +181,11 @@ ipcMain.handle('pty:spawn', (event, { tabId, cwd, command, history, ssh }) => {
     return { ok: false, error: `Could not start ${shell}: ${error.message || error}` };
   }
 
-  p.onData((data) => {
-    if (win && !win.isDestroyed()) win.webContents.send('pty:data', { tabId, data });
-  });
-  p.onExit(({ exitCode }) => {
-    if (win && !win.isDestroyed()) win.webContents.send('pty:exit', { tabId, exitCode });
-    ptys.delete(tabId);
+  attachPty(ptys, tabId, p, (channel, payload) => {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
   });
 
-  ptys.set(tabId, p);
-
-  if (command) {
+  if (command && !ssh) {
     p.write(command + '\r');
   }
   return { ok: true, shell, cwd: startCwd };
@@ -220,8 +204,7 @@ ipcMain.on('pty:resize', (event, { tabId, cols, rows }) => {
 });
 
 ipcMain.on('pty:kill', (event, { tabId }) => {
-  const p = ptys.get(tabId);
-  if (p) { try { p.kill(); } catch {} ptys.delete(tabId); }
+  stopPty(ptys, tabId);
 });
 
 ipcMain.on('notification:show', (_event, { tabId, title, body }) => {
@@ -983,7 +966,7 @@ app.on('window-all-closed', () => {
 const COMMANDS = [
   { id: 'new-tab', label: 'New Terminal', accel: 'CmdOrCtrl+T', group: 'Terminal' },
   { id: 'new-local', label: 'New Local Terminal', accel: 'CmdOrCtrl+L', group: 'Terminal' },
-  { id: 'new-host', label: 'New Remote Session', accel: 'CmdOrCtrl+Shift+H', group: 'Terminal' },
+  { id: 'new-host', label: 'SSH Connections', accel: 'CmdOrCtrl+Shift+H', group: 'Terminal' },
   { id: 'new-folder', label: 'New Folder', accel: 'CmdOrCtrl+Shift+N', group: 'Terminal' },
   { id: 'duplicate', label: 'Duplicate Terminal', accel: 'CmdOrCtrl+Shift+D', group: 'Terminal' },
   { id: 'close-tab', label: 'Close Pane', accel: 'CmdOrCtrl+W', group: 'Terminal' },

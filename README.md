@@ -29,10 +29,11 @@ outside the public repository.
 
 ## How it works
 
-coco is **dock-first**: there is no row of tabs at the top. Every open terminal
-lives as an entry **inside the side dock**, where you organize them into folders
-like a file tree. Click an entry to focus its terminal; the active terminal fills
-the main area, with a live status bar underneath.
+coco defaults to a **side dock**, where open terminals can be organized into
+folders like a file tree. An optional top-bar layout is available from the
+command palette. Click a terminal to focus it, or show several in split panes.
+Saved servers live independently in **SSH Connections**, so closing or removing
+a terminal from the dock preserves its connection for later.
 
 ## Features
 
@@ -43,19 +44,18 @@ the main area, with a live status bar underneath.
   will land.
 - **Auto-named by folder** — each session's name tracks its current directory via
   shell integration (OSC 7). Rename inline anytime (the name then sticks).
-- **Pin / save sessions** — pin a session (⌘D) to keep it in the dock permanently;
-  it stays after closing and reopens on click. Unpinned terminals are ephemeral.
-- **Save & restore** — coco continuously snapshots your layout. On quit it asks
-  whether to restore next time; after a crash/force-quit it offers to reopen
-  everything on launch.
+- **Save & restore** — coco continuously saves workspace organization and, when
+  **Restore sessions on launch** is enabled, reopens terminal entries and saved
+  content. A restored shell is a new process. Saved SSH connections remain
+  available even when terminal restoration is disabled.
 - **Command palette** (⌘K) — fuzzy-run any action or jump to any session.
-- **Context menus** — right-click any row for new terminal here, duplicate, pin,
-  copy path, rename, delete.
+- **Context menus** — right-click rows for terminal, folder, rename, duplicate,
+  path-copying, and removal actions appropriate to that entry.
 - **Filter** (⌘L) — type to filter the dock to matching sessions.
 - **Status bar** — current path, shell, open count, theme, and a clock.
-- **Brand-new “Coco” theme** (default) plus a clean “Coco Light”, and 14 more:
-  Midnight, Emerald, Amber CRT, Termius Dark/Light, Dracula, Nord, Tokyo Night,
-  Gruvbox, One Dark, Solarized, Synthwave, Cyberpunk, Monokai. Open with ⌘P.
+- **18 themes** — Coco (default), Coco Light, Paper, Fax Machine, Midnight,
+  Emerald, Amber CRT, Termius Dark/Light, Dracula, Nord, Tokyo Night, Gruvbox,
+  One Dark, Solarized Dark, Synthwave, Cyberpunk, and Monokai. Open with ⌘P.
 - **Clickable file paths** — paths *and* bare filenames/dirs of **any type** (anything
   `ls` prints — images, PDFs, text, folders) that actually exist are detected. They
   **underline when you hover**; **hold ⌘ (or Ctrl) while hovering** to show a preview
@@ -74,10 +74,19 @@ the main area, with a live status bar underneath.
 - **Editable shortcuts** — open **Keyboard Shortcuts** (⌘,), click any shortcut and
   press the new keys (Backspace clears, Esc cancels). Conflicts are flagged; reset any
   one or all to defaults.
-- **SSH hosts & keys** — save remote hosts (name, host, user, port, key) right in the
-  dock alongside local terminals; click to connect. Password / host-key prompts appear
-  inline in the terminal. Register private keys once in **Manage SSH Keys** and pick them
-  per host. Add via the dock’s server button, right-click a folder, or the palette.
+- **SSH Connections & keys** — save remote hosts (name, host, user, port, key)
+  without connecting, then open them any time from **SSH Connections** (⌘⇧H).
+  Closing a terminal or removing its dock entry preserves the saved host; only
+  deleting it in SSH Connections removes it permanently. Password / host-key
+  prompts appear inline in the terminal. Register private-key paths in
+  **Manage SSH Keys** and choose them per host. Use the dock's server button,
+  folder context menu, or command palette to manage connections.
+- **Remote tools** — browse and transfer files through SFTP, and manage SSH port
+  forwards. Desktop local-domain tools can map development services to local names.
+- **Workspaces & layouts** — separate terminal organization, saved hosts, commands,
+  keys, and domains; save split layouts and broadcast input to visible panes.
+- **Git panel** — inspect and operate on the local repository for the active
+  terminal when Git integration is enabled.
 - **Drag a file in** — drag any file/folder from Finder onto a terminal to insert its
   shell-quoted path.
 - **Crisp icons** — a bundled Lucide icon set (SVG), no emoji or bitmap images.
@@ -91,7 +100,7 @@ the main area, with a live status bar underneath.
 | ⌘⇧D | Duplicate terminal |
 | ⌘W | Close terminal |
 | ⌘R | Rename |
-| ⌘D | Pin / unpin |
+| ⌘⇧H | SSH Connections |
 | ⌘⇧C | Copy current path |
 | ⌘1…9 | Jump to terminal N |
 | ⌃Tab / ⌃⇧Tab | Next / previous terminal |
@@ -120,8 +129,10 @@ src/
     renderer.js          terminals, dock tree, drag/drop, palette, save/restore
 ```
 
-Saved sessions/folders live in `~/Library/Application Support/coco-terminal/data/`.
-They are never bundled into the application or uploaded by coco.
+Desktop workspace state and saved SSH profiles live under Electron's user-data
+directory (`~/Library/Application Support/coco-terminal/data/` on macOS). Saved
+SSH profiles are independent of open terminal entries. Data is never bundled
+into the application or uploaded by coco.
 
 ## Open source and security
 
