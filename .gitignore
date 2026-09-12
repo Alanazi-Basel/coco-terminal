@@ -24,3 +24,6 @@ docs/DEPLOYMENT.md
 docs/RELEASE-COMMANDS.md
 docs/TAROUT-MIGRATION.md
 assets/marketing/
+
+# Local Tarout authentication and deployment state
+.tarout/

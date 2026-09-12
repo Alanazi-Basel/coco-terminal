@@ -1,7 +1,7 @@
 {
   "name": "coco-terminal",
   "desktopName": "app.coco.terminal",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A modern workspace terminal for macOS, Windows, and Linux.",
   "main": "src/main/main.js",
   "author": "Coco",
@@ -79,7 +79,8 @@
     },
     "files": [
       "src/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "!assets/marketing/**"
     ],
     "dmg": {
       "sign": true
